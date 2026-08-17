@@ -1,0 +1,2338 @@
+import json
+import re
+import subprocess
+import time
+from collections import Counter
+from pathlib import Path
+
+import feedparser
+import numpy as np
+import pandas as pd
+import requests
+import trafilatura
+from bs4 import BeautifulSoup
+from scipy.spatial.distance import jensenshannon
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import sys
+from discourse.infer_deberta_pdtb import predict_relation
+
+PROJECT_DIR = Path(__file__).resolve().parent
+
+EMBEDDING_MODEL = SentenceTransformer("all-mpnet-base-v2")
+
+COLLECTION_MODE = "hybrid"
+# COLLECTION_MODE = "semantic_only"
+
+BASE_DIR = PROJECT_DIR / "multi_event_framing_project"
+LEXICON_DIR = BASE_DIR / "lexicons"
+LEXICON_DIR.mkdir(parents=True, exist_ok=True)
+
+VAD_LEXICON_FILE = LEXICON_DIR / "NRC-VAD-Lexicon.txt"
+EMOTION_LEXICON_FILE = LEXICON_DIR / "NRC-Emotion-Lexicon.txt"
+
+CONNREL_DIR = Path.home() / "Documents" / "ConnRel"
+CONNREL_INFER_SCRIPT = CONNREL_DIR / "discourse" / "infer_deberta_pdtb.py"
+
+FEATURE_LABELS = {
+    "hedge_rate_deviation": "Hedging",
+    "emotional_amplification_deviation": "Emotional Amplification",
+    "tfidf_discourse_emphasis_deviation": "Discourse Emphasis",
+    "omission_score": "Omission / Informational Omission",
+    "content_deviation_deviation": "Semantic / Content Deviation",
+    "stance_misalignment_deviation": "Stance Misalignment",
+    "causal_coherence_deviation": "Causal Coherence"
+}
+
+PROPOSAL_FEATURE_COLUMNS = [
+    "hedge_rate_deviation",
+    "emotional_amplification_deviation",
+    "tfidf_discourse_emphasis_deviation",
+    "omission_score",
+    "content_deviation_deviation",
+    "stance_misalignment_deviation",
+    "causal_coherence_deviation"
+]
+
+RSS_FEEDS = {
+    "PBS_NewsHour": ["https://www.pbs.org/newshour/feeds/rss/headlines"],
+    "NPR": [
+        "https://feeds.npr.org/1001/rss.xml",
+        "https://feeds.npr.org/1004/rss.xml",
+        "https://feeds.npr.org/1006/rss.xml"
+    ],
+    "Democracy_Now": ["https://www.democracynow.org/democracynow.rss"],
+    "Deutsche_Welle": [
+        "https://rss.dw.com/xml/rss-en-all",
+        "https://rss.dw.com/xml/rss-en-world"
+    ],
+    "ProPublica": ["https://www.propublica.org/feeds/propublica/main"],
+    "BBC": ["https://feeds.bbci.co.uk/news/world/rss.xml"],
+    "Al_Jazeera": ["https://www.aljazeera.com/xml/rss/all.xml"],
+    "CBS_News": ["https://www.cbsnews.com/latest/rss/main"],
+    "NBC_News": ["https://feeds.nbcnews.com/nbcnews/public/news"],
+    "The_Guardian": ["https://www.theguardian.com/world/rss"],
+    "ABC_News": ["https://abcnews.go.com/abcnews/topstories"]
+}
+
+EVENTS = [
+    {"query": "Ukraine war", "folder": "event_ukraine_war"},
+    {"query": "Israel Iran conflict", "folder": "event_israel_iran"},
+    {"query": "Climate policy", "folder": "event_climate_policy"},
+    {"query": "Trump administration", "folder": "event_trump_administration"},
+    {"query": "World Cup", "folder": "event_world_cup"},
+    {"query": "US inflation report", "folder": "event_us_inflation"},
+    {"query": "SpaceX", "folder": "event_spacex"},
+    {"query": "Extreme weather", "folder": "event_extreme_weather"},
+    {"query": "Israel Gaza", "folder": "event_israel_gaza"},
+    {"query": "US elections", "folder": "event_us_elections"},
+    {"query": "Israel Lebanon", "folder": "event_israel_lebanon"},
+    {"query": "Climate change", "folder": "event_climate_change"},
+    {"query": "Heat wave", "folder": "event_heat_wave"},
+    {"query": "Anthropic", "folder": "event_anthropic"},
+    {"query": "US China trade", "folder": "event_us_china_trade"},
+    {"query": "Artificial intelligence regulation", "folder": "event_ai_regulation"},
+    {"query": "Federal budget", "folder": "event_federal_budget"}
+]
+
+EVENT_KEYWORDS = {
+    "ukraine war": ["ukraine", "russia", "russian", "kyiv", "moscow", "putin", "zelensky"],
+    "israel iran conflict": ["israel", "iran", "tehran", "missile", "hezbollah", "lebanon"],
+    "climate policy": ["climate", "climate change", "emissions", "carbon", "fossil fuel"],
+    "trump administration": ["white house", "administration", "trump administration"],
+    "world cup": ["world cup", "fifa", "soccer", "football"],
+    "us inflation report": ["inflation", "cpi", "consumer prices", "federal reserve"],
+    "spacex": ["spacex", "elon musk", "rocket", "starship"],
+    "extreme weather": ["extreme weather", "storm", "flood", "heat wave", "wildfire"],
+    "israel gaza": ["israel", "gaza", "hamas", "palestinian"],
+    "us elections": ["election", "campaign", "vote", "candidate"],
+    "israel lebanon": ["israel", "lebanon", "hezbollah"],
+    "climate change": ["climate change", "global warming", "emissions", "carbon"],
+    "heat wave": ["heat wave", "extreme heat", "temperature"],
+    "anthropic": ["anthropic", "claude"],
+    "us china trade": ["china", "tariff", "trade", "exports", "imports"],
+    "artificial intelligence regulation": ["artificial intelligence", "ai regulation", "ai safety"],
+    "federal budget": ["budget", "spending", "congress", "deficit", "appropriations"]
+}
+
+GENERIC_TERMS_TO_IGNORE = {
+    "war",
+    "conflict",
+    "environment",
+    "ai",
+    "trump",
+    "prices"
+}
+
+import string
+
+
+def normalize_text(text):
+    if text is None:
+        return ""
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def clean_title(title):
+    title = normalize_text(title)
+    title = title.replace("’", "'")
+    return title.lower()
+
+
+def contains_event_keywords(text, keywords):
+    text = text.lower()
+    return any(keyword.lower() in text for keyword in keywords)
+
+
+def cosine_sim(a, b):
+    if len(a) == 0 or len(b) == 0:
+        return 0.0
+    return cosine_similarity([a], [b])[0][0]
+
+
+def get_feed_items(feed_url):
+    try:
+        feed = feedparser.parse(feed_url)
+        return feed.entries
+    except Exception:
+        return []
+
+
+
+def build_tfidf_matrix(texts, max_features=1500):
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        max_features=max_features,
+        ngram_range=(1, 2)
+    )
+
+    matrix = vectorizer.fit_transform(
+        [str(text) for text in texts]
+    )
+
+    terms = vectorizer.get_feature_names_out()
+
+    return vectorizer, matrix, terms
+
+def get_common_tfidf_terms(df, top_n=25):
+    if df.empty or "text" not in df.columns:
+        return []
+
+    _, matrix, terms = build_tfidf_matrix(df["text"])
+
+    tfidf_df = pd.DataFrame(
+        matrix.toarray(),
+        columns=terms
+    )
+
+    document_presence = (tfidf_df > 0).sum(axis=0)
+
+    minimum_articles = max(
+        2,
+        int(np.ceil(len(df) * 0.40))
+    )
+
+    common_terms = document_presence[
+        document_presence >= minimum_articles
+        ].index.tolist()
+
+    if len(common_terms) == 0:
+        common_terms = list(terms)
+
+    ranked_terms = (
+        tfidf_df[common_terms]
+        .mean(axis=0)
+        .sort_values(ascending=False)
+        .head(top_n)
+        .index
+        .tolist()
+    )
+
+    return ranked_terms
+
+def add_tfidf_discourse_emphasis(df):
+    df = df.copy()
+
+    if df.empty:
+        df["tfidf_discourse_emphasis_deviation"] = []
+        return df
+
+    _, matrix, terms = build_tfidf_matrix(df["text"])
+
+    tfidf_df = pd.DataFrame(
+        matrix.toarray(),
+        columns=terms,
+        index=df.index
+    )
+
+    common_terms = get_common_tfidf_terms(df, top_n=25)
+
+    if len(common_terms) == 0:
+        df["tfidf_discourse_emphasis_deviation"] = 0.0
+        df["salient_common_event_terms"] = ""
+        return df
+
+    emphasis_matrix = tfidf_df[common_terms]
+
+    consensus_vector = emphasis_matrix.mean(axis=0)
+
+    deviations = []
+
+    for idx in df.index:
+        article_vector = emphasis_matrix.loc[idx]
+
+        deviation = np.mean(
+            np.abs(
+                article_vector - consensus_vector
+            )
+        )
+
+        deviations.append(float(deviation))
+
+    df["tfidf_discourse_emphasis_deviation"] = deviations
+
+    df["tfidf_discourse_emphasis"] = (
+        emphasis_matrix.sum(axis=1)
+    )
+
+    df["salient_common_event_terms"] = [
+                                           ", ".join(common_terms)
+                                       ] * len(df)
+
+    return df
+
+def add_omission_scores(df):
+    df = df.copy()
+
+    if df.empty:
+        df["omission_score"] = []
+        return df
+
+    _, matrix, terms = build_tfidf_matrix(df["text"])
+
+    tfidf_df = pd.DataFrame(
+        matrix.toarray(),
+        columns=terms,
+        index=df.index
+    )
+
+    top_event_terms = (
+        tfidf_df
+        .mean(axis=0)
+        .sort_values(ascending=False)
+        .head(20)
+        .index
+        .tolist()
+    )
+
+    omission_scores = []
+
+    for idx in df.index:
+        article_terms = (
+            tfidf_df
+            .loc[idx]
+            .sort_values(ascending=False)
+            .head(50)
+            .index
+            .tolist()
+        )
+
+        missing_terms = set(top_event_terms) - set(article_terms)
+
+        score = len(missing_terms) / max(
+            len(top_event_terms),
+            1
+        )
+
+        omission_scores.append(float(score))
+
+    df["omission_score"] = omission_scores
+
+    return df
+
+def add_semantic_content_deviation(df):
+    df = df.copy()
+
+    if df.empty:
+        df["content_deviation_deviation"] = []
+        return df
+
+    texts = [
+        str(text)[:3000]
+        for text in df["text"]
+    ]
+
+    embeddings = EMBEDDING_MODEL.encode(
+        texts,
+        normalize_embeddings=True
+    )
+
+    consensus = np.mean(
+        embeddings,
+        axis=0
+    )
+
+    consensus = consensus / max(
+        np.linalg.norm(consensus),
+        1e-12
+    )
+
+    similarities = cosine_similarity(
+        embeddings,
+        consensus.reshape(1, -1)
+    ).flatten()
+
+    df["content_similarity_to_consensus"] = similarities
+
+    df["content_deviation"] = 1 - similarities
+
+    consensus_deviation = df["content_deviation"].mean()
+
+    df["content_deviation_deviation"] = (
+        df["content_deviation"]
+        .apply(
+            lambda value:
+            normalized_deviation(
+                value,
+                consensus_deviation
+            )
+        )
+    )
+
+    return df
+
+def load_vad_lexicon(path):
+    vad_df = pd.read_csv(path, sep="\t")
+    vad_df.columns = [
+        column.strip().lower()
+        for column in vad_df.columns
+    ]
+
+    print("VAD columns found:", vad_df.columns.tolist())
+
+    word_column = vad_df.columns[0]
+    valence_column = (
+        "valence"
+        if "valence" in vad_df.columns
+        else vad_df.columns[1]
+    )
+    arousal_column = (
+        "arousal"
+        if "arousal" in vad_df.columns
+        else vad_df.columns[2]
+    )
+    dominance_column = (
+        "dominance"
+        if "dominance" in vad_df.columns
+        else vad_df.columns[3]
+    )
+
+    return {
+        str(row[word_column]).lower(): (
+            float(row[valence_column]),
+            float(row[arousal_column]),
+            float(row[dominance_column])
+        )
+        for _, row in vad_df.iterrows()
+    }
+
+def load_emotion_lexicon(path):
+    emotion_df = pd.read_csv(
+        path,
+        sep="\t",
+        header=None,
+        names=[
+            "word",
+            "emotion",
+            "association"
+        ]
+    )
+
+    emotion_df = emotion_df[
+        emotion_df["association"] == 1
+        ]
+
+    lexicon = {}
+
+    for word, group in emotion_df.groupby("word"):
+        lexicon[str(word).lower()] = set(
+            group["emotion"]
+        )
+
+    return lexicon
+
+def tokenize_words(text):
+    if pd.isna(text):
+        return []
+
+    return re.findall(
+        r"[a-z]+",
+        str(text).lower()
+    )
+
+def compute_vad_emotional_intensity(tokens, vad_lexicon):
+    scores = []
+
+    for token in tokens:
+        if token in vad_lexicon:
+            valence, arousal, dominance = vad_lexicon[token]
+
+            valence_intensity = abs(valence - 0.5) * 2
+            dominance_intensity = abs(dominance - 0.5) * 2
+
+            scores.append(
+                np.mean(
+                    [
+                        valence_intensity,
+                        arousal,
+                        dominance_intensity
+                    ]
+                )
+            )
+
+    if len(scores) == 0:
+        return 0.0
+
+    return float(np.mean(scores))
+
+EMOTION_CATEGORIES = [
+    "anger",
+    "anticipation",
+    "disgust",
+    "fear",
+    "joy",
+    "sadness",
+    "surprise",
+    "trust"
+]
+
+def compute_emotion_distribution(tokens, emotion_lexicon):
+    counts = {
+        emotion: 0
+        for emotion in EMOTION_CATEGORIES
+    }
+
+    total = 0
+
+    for token in tokens:
+        if token in emotion_lexicon:
+            for emotion in emotion_lexicon[token]:
+                if emotion in counts:
+                    counts[emotion] += 1
+                    total += 1
+
+    if total == 0:
+        return {
+            emotion: 0.0
+            for emotion in EMOTION_CATEGORIES
+        }
+
+    return {
+        emotion: counts[emotion] / total
+        for emotion in EMOTION_CATEGORIES
+    }
+
+def add_emotional_amplification(
+        df,
+        vad_lexicon,
+        emotion_lexicon
+):
+    df = df.copy()
+
+    df["tokens"] = df["text"].apply(tokenize_words)
+
+    df["vad_emotional_intensity"] = (
+        df["tokens"]
+        .apply(
+            lambda tokens:
+            compute_vad_emotional_intensity(
+                tokens,
+                vad_lexicon
+            )
+        )
+    )
+
+    emotion_profiles = (
+        df["tokens"]
+        .apply(
+            lambda tokens:
+            compute_emotion_distribution(
+                tokens,
+                emotion_lexicon
+            )
+        )
+    )
+
+    for emotion in EMOTION_CATEGORIES:
+        df[f"emotion_{emotion}_rate"] = (
+            emotion_profiles
+            .apply(
+                lambda profile:
+                profile[emotion]
+            )
+        )
+
+    vad_consensus = df["vad_emotional_intensity"].mean()
+
+    df["vad_intensity_deviation"] = (
+        df["vad_emotional_intensity"]
+        .apply(
+            lambda value:
+            normalized_deviation(
+                value,
+                vad_consensus
+            )
+        )
+    )
+
+    emotion_deviation_columns = []
+
+    for emotion in EMOTION_CATEGORIES:
+        column = f"emotion_{emotion}_rate"
+        deviation_column = f"{column}_deviation"
+
+        consensus = df[column].mean()
+
+        df[deviation_column] = (
+            df[column]
+            .apply(
+                lambda value:
+                normalized_deviation(
+                    value,
+                    consensus
+                )
+            )
+        )
+
+        emotion_deviation_columns.append(deviation_column)
+
+    df["emotion_distribution_deviation"] = (
+        df[emotion_deviation_columns]
+        .mean(axis=1)
+    )
+
+    df["emotional_amplification_deviation"] = (
+        df[
+            [
+                "vad_intensity_deviation",
+                "emotion_distribution_deviation"
+            ]
+        ]
+        .mean(axis=1)
+    )
+
+    return df.drop(columns=["tokens"])
+
+HEDGE_WORDS = [
+    "may", "might", "could", "can", "would", "should",
+    "possibly", "possible", "possibility", "perhaps",
+    "probably", "probable", "likely", "unlikely",
+    "presumably", "potentially", "potential", "apparently",
+    "reportedly", "allegedly", "supposedly", "claimed",
+    "claims", "according to", "sources say", "officials say",
+    "appears", "appear", "appeared", "seems", "seem",
+    "seemed", "suggests", "suggest", "suggested",
+    "indicates", "indicate", "indicated",
+    "believe", "believes", "believed", "think", "thinks",
+    "thought", "assume", "assumes", "assumed",
+    "estimate", "estimates", "estimated", "expect",
+    "expects", "expected",
+    "unclear", "uncertain", "uncertainty", "doubt",
+    "doubts", "question", "questions", "questioned",
+    "speculate", "speculates", "speculated", "speculation",
+    "about", "around", "roughly", "approximately",
+    "nearly", "almost",
+    "said to be", "is said to", "was said to",
+    "is believed to", "was believed to",
+    "is expected to", "was expected to",
+    "is thought to", "was thought to"
+]
+
+def count_terms(text, terms):
+    text_lower = str(text).lower()
+    total = 0
+
+    for term in terms:
+        total += len(
+            re.findall(
+                r"\b" + re.escape(term.lower()) + r"\b",
+                text_lower
+            )
+        )
+
+    return total
+
+def add_hedging(df):
+    df = df.copy()
+
+    df["num_sentences"] = (
+        df["text"]
+        .apply(sentence_count)
+    )
+
+    df["hedge_count"] = (
+        df["text"]
+        .apply(
+            lambda text:
+            count_terms(
+                text,
+                HEDGE_WORDS
+            )
+        )
+    )
+
+    df["hedge_rate"] = (
+            df["hedge_count"]
+            /
+            df["num_sentences"]
+    )
+
+    consensus = df["hedge_rate"].mean()
+
+    df["hedge_rate_deviation"] = (
+        df["hedge_rate"]
+        .apply(
+            lambda value:
+            normalized_deviation(
+                value,
+                consensus
+            )
+        )
+    )
+
+    return df
+
+STANCE_CLASSES = [
+    "favor",
+    "against",
+    "neutral"
+]
+
+
+STANCE_TARGETS = {
+    "ukraine war": ["ukraine", "russia"],
+    "israel iran conflict": ["israel", "iran", "hezbollah", "lebanon"],
+    "israel gaza": ["israel", "gaza", "hamas", "palestinians"],
+    "israel lebanon": ["israel", "lebanon", "hezbollah"],
+    "climate policy": ["climate policy", "emissions", "fossil fuels"],
+    "climate change": ["climate change", "global warming", "emissions"],
+    "heat wave": ["heat wave", "extreme heat", "climate change"],
+    "us inflation report": ["inflation", "consumer prices", "federal reserve"],
+    "us china trade": ["united states", "china", "tariffs"],
+    "artificial intelligence regulation": ["artificial intelligence", "regulation", "ai safety"],
+    "federal budget": ["federal budget", "spending", "deficit"],
+    "trump administration": ["trump administration", "white house"],
+    "world cup": ["world cup", "fifa"],
+    "spacex": ["spacex", "elon musk"],
+    "anthropic": ["anthropic", "artificial intelligence"],
+    "extreme weather": ["extreme weather", "climate change"],
+    "us elections": ["elections", "campaign", "candidates"]
+}
+
+
+def softmax(scores):
+    scores = np.array(scores, dtype=float)
+    scores = scores - np.max(scores)
+
+    exp_scores = np.exp(scores)
+    denominator = exp_scores.sum()
+
+    if denominator == 0:
+        return np.ones(len(scores)) / len(scores)
+
+    return exp_scores / denominator
+
+
+def normalize_probability_vector(vector):
+    vector = np.array(vector, dtype=float)
+    vector = np.clip(vector, 1e-12, None)
+
+    total = vector.sum()
+
+    if total == 0:
+        return np.ones(len(vector)) / len(vector)
+
+    return vector / total
+
+
+def jensen_shannon_divergence(p, q):
+    p = normalize_probability_vector(p)
+    q = normalize_probability_vector(q)
+
+    midpoint = 0.5 * (p + q)
+
+    kl_pm = np.sum(
+        p * np.log(p / midpoint)
+    )
+
+    kl_qm = np.sum(
+        q * np.log(q / midpoint)
+    )
+
+    return float(
+        0.5 * kl_pm + 0.5 * kl_qm
+    )
+
+
+def split_into_claim_units(text):
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        str(text)
+    )
+
+    return [
+        sentence.strip()
+        for sentence in sentences
+        if len(sentence.strip().split()) >= 8
+    ][:40]
+
+
+def get_stance_targets(event_query):
+    query = event_query.lower().strip()
+
+    if query in STANCE_TARGETS:
+        return STANCE_TARGETS[query]
+
+    return [
+        term
+        for term in query.split()
+        if len(term) > 3
+    ]
+
+
+def sentence_mentions_target(sentence, target):
+    sentence_lower = sentence.lower()
+
+    target_terms = [
+        term
+        for term in target.lower().split()
+        if len(term) > 2
+    ]
+
+    return any(
+        term in sentence_lower
+        for term in target_terms
+    )
+
+
+def estimate_target_stance_for_unit(text_unit, target):
+    unit_embedding = EMBEDDING_MODEL.encode(
+        [str(text_unit)],
+        normalize_embeddings=True
+    )
+
+    prompts = [
+        f"This text supports {target}.",
+        f"This text opposes {target}.",
+        f"This text neutrally describes {target}."
+    ]
+
+    prompt_embeddings = EMBEDDING_MODEL.encode(
+        prompts,
+        normalize_embeddings=True
+    )
+
+    similarities = cosine_similarity(
+        unit_embedding,
+        prompt_embeddings
+    ).flatten()
+
+    probabilities = softmax(similarities)
+
+    return {
+        "favor": float(probabilities[0]),
+        "against": float(probabilities[1]),
+        "neutral": float(probabilities[2])
+    }
+
+
+def estimate_target_stance_for_article(text, target):
+    claim_units = split_into_claim_units(text)
+
+    target_units = [
+        unit
+        for unit in claim_units
+        if sentence_mentions_target(unit, target)
+    ]
+
+    if len(target_units) == 0:
+        target_units = claim_units[:10]
+
+    if len(target_units) == 0:
+        return {
+            "favor": 0.0,
+            "against": 0.0,
+            "neutral": 1.0
+        }
+
+    unit_profiles = [
+        estimate_target_stance_for_unit(unit, target)
+        for unit in target_units
+    ]
+
+    return {
+        stance_class: float(
+            np.mean(
+                [
+                    profile[stance_class]
+                    for profile in unit_profiles
+                ]
+            )
+        )
+        for stance_class in STANCE_CLASSES
+    }
+
+
+def estimate_article_stance_profile(text, targets):
+    target_profiles = [
+        estimate_target_stance_for_article(text, target)
+        for target in targets
+    ]
+
+    if len(target_profiles) == 0:
+        return {
+            "favor": 0.0,
+            "against": 0.0,
+            "neutral": 1.0
+        }
+
+    return {
+        stance_class: float(
+            np.mean(
+                [
+                    profile[stance_class]
+                    for profile in target_profiles
+                ]
+            )
+        )
+        for stance_class in STANCE_CLASSES
+    }
+
+
+def stance_profile_to_vector(profile):
+    return np.array(
+        [
+            profile["favor"],
+            profile["against"],
+            profile["neutral"]
+        ],
+        dtype=float
+    )
+
+
+def add_stance_misalignment(df, event_query):
+    df = df.copy()
+
+    targets = get_stance_targets(event_query)
+
+    stance_profiles = (
+        df["text"]
+        .apply(
+            lambda text:
+            estimate_article_stance_profile(
+                text,
+                targets
+            )
+        )
+    )
+
+    article_vectors = stance_profiles.apply(
+        stance_profile_to_vector
+    )
+
+    consensus_vector = np.mean(
+        np.vstack(article_vectors.values),
+        axis=0
+    )
+
+    consensus_vector = normalize_probability_vector(
+        consensus_vector
+    )
+
+    df["stance_distribution_js_divergence"] = (
+        article_vectors
+        .apply(
+            lambda vector:
+            jensen_shannon_divergence(
+                vector,
+                consensus_vector
+            )
+        )
+    )
+
+    df["stance_misalignment_deviation"] = (
+        df["stance_distribution_js_divergence"]
+    )
+
+    return df
+
+CAUSAL_COHERENCE_METHOD = "connrel_pcc_checkpoint_10_active"
+
+PDTB_RELATION_FAMILIES = [
+    "conjunction",
+    "contrast",
+    "instantiation",
+    "restatement",
+    "cause",
+    "condition",
+    "purpose",
+    "temporal"
+]
+
+
+FALLBACK_PDTB_FAMILIES = [
+    "Comparison",
+    "Contingency",
+    "Expansion",
+    "Temporal"
+]
+
+
+CONNECTIVE_TO_PDTB_FAMILY = {
+    "because": "Contingency",
+    "since": "Contingency",
+    "therefore": "Contingency",
+    "thus": "Contingency",
+    "hence": "Contingency",
+    "so": "Contingency",
+    "consequently": "Contingency",
+    "as a result": "Contingency",
+    "due to": "Contingency",
+
+    "but": "Comparison",
+    "however": "Comparison",
+    "although": "Comparison",
+    "though": "Comparison",
+    "whereas": "Comparison",
+    "while": "Comparison",
+    "nevertheless": "Comparison",
+    "nonetheless": "Comparison",
+    "instead": "Comparison",
+
+    "and": "Expansion",
+    "also": "Expansion",
+    "furthermore": "Expansion",
+    "moreover": "Expansion",
+    "in addition": "Expansion",
+    "besides": "Expansion",
+    "for example": "Expansion",
+
+    "then": "Temporal",
+    "after": "Temporal",
+    "before": "Temporal",
+    "meanwhile": "Temporal",
+    "subsequently": "Temporal",
+    "eventually": "Temporal",
+}
+
+
+def split_into_sentences(text):
+    if not isinstance(text, str):
+        return []
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        text.strip()
+    )
+
+    return [
+        sentence.strip()
+        for sentence in sentences
+        if len(sentence.strip().split()) >= 5
+    ]
+
+
+def make_adjacent_argument_pairs(text, max_pairs=20):
+    sentences = split_into_sentences(text)
+
+    all_pairs = []
+
+    for i in range(len(sentences) - 1):
+        all_pairs.append(
+            {
+                "arg1": sentences[i],
+                "arg2": sentences[i + 1],
+            }
+        )
+
+    if len(all_pairs) <= max_pairs:
+        return all_pairs
+
+    indices = np.linspace(
+        0,
+        len(all_pairs) - 1,
+        max_pairs,
+        dtype=int
+    )
+
+    return [
+        all_pairs[i]
+        for i in indices
+    ]
+
+def generate_likely_connective(arg1, arg2):
+    joined = f"{arg1} {arg2}".lower()
+
+    if any(
+        phrase in joined
+        for phrase in [
+            "because",
+            "due to",
+            "caused",
+            "led to",
+            "resulted in",
+            "as a result",
+            "therefore",
+            "consequently",
+        ]
+    ):
+        return "because"
+
+    if any(
+        phrase in joined
+        for phrase in [
+            "however",
+            "but",
+            "although",
+            "despite",
+            "whereas",
+            "nevertheless",
+            "contrast",
+        ]
+    ):
+        return "however"
+
+    if any(
+        phrase in joined
+        for phrase in [
+            "after",
+            "before",
+            "then",
+            "meanwhile",
+            "later",
+            "subsequently",
+        ]
+    ):
+        return "then"
+
+    if any(
+        phrase in joined
+        for phrase in [
+            "also",
+            "furthermore",
+            "moreover",
+            "in addition",
+            "another",
+            "for example",
+        ]
+    ):
+        return "also"
+
+    return "and"
+
+
+def fallback_article_relation_distribution(text):
+    pairs = make_adjacent_argument_pairs(text)
+
+    counts = Counter()
+
+    for pair in pairs:
+        connective = generate_likely_connective(
+            pair["arg1"],
+            pair["arg2"]
+        )
+
+        family = CONNECTIVE_TO_PDTB_FAMILY.get(
+            connective,
+            "Expansion"
+        )
+
+        counts[family] += 1
+
+    total = sum(counts.values())
+
+    if total == 0:
+        return {
+            family: 1.0 / len(FALLBACK_PDTB_FAMILIES)
+            for family in FALLBACK_PDTB_FAMILIES
+        }
+
+    return {
+        family: counts[family] / total
+        for family in FALLBACK_PDTB_FAMILIES
+    }
+
+def run_connrel_pair(arg1, arg2):
+    if not CONNREL_INFER_SCRIPT.exists():
+        print("ConnRel infer script not found:", CONNREL_INFER_SCRIPT)
+        return None
+
+    try:
+        completed = subprocess.run(
+            [
+                "/Users/keshkhullar/connrel310/bin/python",
+                str(CONNREL_INFER_SCRIPT),
+                "--arg1",
+                str(arg1),
+                "--arg2",
+                str(arg2),
+            ],
+            cwd=str(CONNREL_DIR),
+            capture_output=True,
+            text=True,
+            timeout=20
+        )
+
+        if completed.returncode != 0:
+            print("\n===== CONNREL STDERR =====")
+            print(completed.stderr)
+            print("==========================")
+            return None
+
+        predicted_relation = None
+
+        valid_pdtb_labels = {
+            "comparison": "Comparison",
+            "contingency": "Contingency",
+            "expansion": "Expansion",
+            "temporal": "Temporal",
+        }
+
+        for line in completed.stdout.splitlines():
+            line = line.strip()
+
+            if line.startswith("Predicted relation:"):
+                predicted_relation = line.split(":", 1)[1].strip()
+
+            elif line.lower() in valid_pdtb_labels:
+                predicted_relation = valid_pdtb_labels[line.lower()]
+
+        if predicted_relation:
+            return {predicted_relation: 1.0}
+
+        print("\n===== CONNREL STDOUT WITHOUT RELATION =====")
+        print(completed.stdout)
+        print("===========================================")
+        return None
+
+    except Exception as e:
+        print("ConnRel error:", e)
+        return None
+
+def connrel_article_relation_distribution(text):
+    pairs = make_adjacent_argument_pairs(
+        text,
+        max_pairs=20
+    )
+
+    print("\n--- ConnRel diagnostics ---")
+    print("sentence pairs:", len(pairs))
+    print("first pair arg1:", pairs[0]["arg1"][:200] if pairs else "")
+    print("first pair arg2:", pairs[0]["arg2"][:200] if pairs else "")
+
+
+    if len(pairs) == 0:
+        return None
+
+    probability_rows = []
+
+    for pair in pairs:
+        result = run_connrel_pair(
+            pair["arg1"],
+            pair["arg2"]
+        )
+
+        if result is not None:
+            probability_rows.append(result)
+
+    if len(probability_rows) == 0:
+        return None
+
+    all_labels = sorted(
+        {
+            label
+            for row in probability_rows
+            for label in row.keys()
+        }
+    )
+
+    averaged = {}
+
+    for label in all_labels:
+        averaged[label] = float(
+            np.mean(
+                [
+                    row.get(label, 0.0)
+                    for row in probability_rows
+                ]
+            )
+        )
+
+    total = sum(averaged.values())
+
+    if total == 0:
+        return None
+
+    return {
+        label: value / total
+        for label, value in averaged.items()
+    }
+
+
+def article_relation_distribution(text):
+    connrel_distribution = connrel_article_relation_distribution(text)
+
+    if connrel_distribution is not None:
+        return connrel_distribution, "connrel"
+
+    return fallback_article_relation_distribution(text), "fallback"
+
+
+def relation_distribution_to_array(distribution, labels):
+    vector = np.array(
+        [
+            distribution.get(label, 0.0)
+            for label in labels
+        ],
+        dtype=float
+    )
+
+    return normalize_probability_vector(vector)
+
+
+def add_causal_coherence(df):
+    df = df.copy()
+
+    if "text" not in df.columns or df.empty:
+        df["causal_coherence_deviation"] = 0.0
+        return df
+
+    distributions = []
+    methods = []
+
+    for text in df["text"]:
+        distribution, method = article_relation_distribution(text)
+
+        distributions.append(distribution)
+        methods.append(method)
+
+    all_labels = sorted(
+        {
+            label
+            for distribution in distributions
+            for label in distribution.keys()
+        }
+    )
+
+    article_vectors = np.vstack(
+        [
+            relation_distribution_to_array(
+                distribution,
+                all_labels
+            )
+            for distribution in distributions
+        ]
+    )
+
+    consensus = np.mean(
+        article_vectors,
+        axis=0
+    )
+
+    consensus = normalize_probability_vector(consensus)
+
+    scores = []
+
+    for vector in article_vectors:
+        scores.append(
+            float(
+                jensenshannon(
+                    vector,
+                    consensus
+                )
+            )
+        )
+
+    df["causal_coherence_deviation"] = scores
+    df["causal_coherence_method"] = methods
+
+    for idx, label in enumerate(all_labels):
+        safe_label = re.sub(
+            r"[^a-zA-Z0-9]+",
+            "_",
+            label.lower()
+        ).strip("_")
+
+        df[f"pdtb_{safe_label}_rate"] = article_vectors[:, idx]
+
+    print()
+    print("PDTB-style causal coherence diagnostics")
+    print("method:", CAUSAL_COHERENCE_METHOD)
+    print("labels:", ", ".join(all_labels))
+    print(
+        "ConnRel articles:",
+        methods.count("connrel"),
+        "/",
+        len(methods)
+    )
+    print(
+        "fallback articles:",
+        methods.count("fallback"),
+        "/",
+        len(methods)
+    )
+    print(
+        "causal coherence std:",
+        round(
+            df["causal_coherence_deviation"].std(),
+            4
+        )
+    )
+
+    return df
+
+def clean_filename(text):
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", str(text))
+    return text.strip("_")[:120]
+
+
+def word_count(text):
+    return max(len(str(text).split()), 1)
+
+
+def sentence_count(text):
+    sentences = re.split(r"[.!?]+", str(text))
+    sentences = [s.strip() for s in sentences if s.strip()]
+    return max(len(sentences), 1)
+
+
+def normalized_deviation(value, consensus_value):
+    if pd.isna(value) or pd.isna(consensus_value):
+        return 0.0
+
+    denominator = max(abs(value), abs(consensus_value), 1e-8)
+    return abs(value - consensus_value) / denominator
+
+def extract_text(url):
+    try:
+        response = requests.get(
+            url,
+            timeout=20,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+                )
+            }
+        )
+
+        if response.status_code != 200:
+            return None
+
+        extracted = trafilatura.extract(
+            response.text,
+            include_comments=False,
+            include_tables=False,
+            favor_precision=True
+        )
+
+        if extracted is not None and len(extracted.split()) >= 100:
+            return extracted
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        paragraphs = [
+            p.get_text(" ", strip=True)
+            for p in soup.find_all("p")
+        ]
+
+        fallback_text = " ".join(paragraphs)
+
+        if len(fallback_text.split()) >= 100:
+            return fallback_text
+
+        return None
+
+    except requests.exceptions.RequestException:
+        return None
+
+
+def is_valid_article_text(text):
+    if text is None:
+        return False
+
+    text_lower = text.lower()
+
+    bad_phrases = [
+        "video player from loading",
+        "browser extensions seems to be blocking",
+        "disable it on this site",
+        "enable javascript",
+        "subscribe to continue",
+        "please enable cookies",
+        "access to this page has been denied",
+        "this content is not available"
+    ]
+
+    if any(phrase in text_lower for phrase in bad_phrases):
+        return False
+
+    return len(text.split()) >= 100
+
+
+def should_skip_url(url):
+    url_lower = str(url).lower()
+
+    skip_patterns = [
+        "/live/",
+        "/video/",
+        "/videos/",
+        "/watch/",
+        "/now/video/",
+        "live-updates",
+        "live-blog"
+    ]
+
+    return any(pattern in url_lower for pattern in skip_patterns)
+
+
+def get_event_terms(event_query):
+    terms = EVENT_KEYWORDS.get(
+        event_query.lower(),
+        [term for term in event_query.lower().split() if len(term) > 2]
+    )
+
+    return [
+        term
+        for term in terms
+        if term not in GENERIC_TERMS_TO_IGNORE
+    ]
+
+
+def semantic_similarity(text_a, text_b):
+    embeddings = EMBEDDING_MODEL.encode(
+        [str(text_a), str(text_b)],
+        normalize_embeddings=True
+    )
+
+    return float(
+        cosine_similarity(
+            [embeddings[0]],
+            [embeddings[1]]
+        )[0][0]
+    )
+
+
+def semantic_similarity_to_event(text, event_query):
+    return semantic_similarity(str(text)[:3000], event_query)
+
+
+def keyword_support_score(text, event_query):
+    text_lower = str(text).lower()
+    keywords = get_event_terms(event_query)
+
+    return sum(
+        text_lower.count(keyword)
+        for keyword in keywords
+    )
+
+
+def is_valid_for_event_hybrid(text, event_query):
+    semantic_score = semantic_similarity_to_event(text, event_query)
+    keyword_hits = keyword_support_score(text, event_query)
+
+    if semantic_score >= 0.32:
+        return True
+
+    if semantic_score >= 0.24 and keyword_hits >= 2:
+        return True
+
+    print(
+        "Rejected hybrid:",
+        "semantic similarity",
+        semantic_score,
+        "keyword hits",
+        keyword_hits
+    )
+
+    return False
+
+
+def is_valid_for_event_semantic_only(text, event_query):
+    semantic_score = semantic_similarity_to_event(text, event_query)
+
+    if semantic_score >= 0.32:
+        return True
+
+    print("Rejected semantic-only:", "semantic similarity", semantic_score)
+    return False
+
+
+def is_valid_for_event(text, event_query):
+    if COLLECTION_MODE == "semantic_only":
+        return is_valid_for_event_semantic_only(text, event_query)
+
+    return is_valid_for_event_hybrid(text, event_query)
+
+
+def score_candidate_hybrid(title, summary, event_query):
+    combined = (str(title) + " " + str(summary)).strip()
+
+    semantic_score = semantic_similarity(combined, event_query)
+    keyword_hits = keyword_support_score(combined, event_query)
+
+    return semantic_score + (0.03 * keyword_hits)
+
+
+def score_candidate_semantic_only(title, summary, event_query):
+    combined = (str(title) + " " + str(summary)).strip()
+    return semantic_similarity(combined, event_query)
+
+
+def score_candidate(title, summary, event_query):
+    if COLLECTION_MODE == "semantic_only":
+        return score_candidate_semantic_only(title, summary, event_query)
+
+    return score_candidate_hybrid(title, summary, event_query)
+
+
+def candidate_passes_initial_filter(candidate_score, keyword_hits):
+    if COLLECTION_MODE == "semantic_only":
+        return candidate_score >= 0.26
+
+    return candidate_score >= 0.26 or keyword_hits >= 2
+
+
+def get_democracy_now_deeper_links(url):
+    deeper_links = []
+
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        if response.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            title = a.get_text(" ", strip=True)
+
+            if len(title) < 20:
+                continue
+
+            if href.startswith("/"):
+                href = "https://www.democracynow.org" + href
+
+            if "democracynow.org" not in href:
+                continue
+
+            if "headlines" in href.lower():
+                continue
+
+            deeper_links.append(
+                {
+                    "title": title,
+                    "url": href
+                }
+            )
+
+        seen = set()
+        unique_links = []
+
+        for item in deeper_links:
+            if item["url"] not in seen:
+                seen.add(item["url"])
+                unique_links.append(item)
+
+        return unique_links[:5]
+
+    except Exception as e:
+        print("Democracy Now deeper-link error:", e)
+        return []
+
+
+def collect_event(event_query, output_dir):
+    text_dir = output_dir / "texts"
+    text_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    visited_urls = set()
+
+    print("Collection mode:", COLLECTION_MODE)
+
+    for source, feeds in RSS_FEEDS.items():
+        print("\nChecking", source)
+
+        candidates = []
+
+        for feed_url in feeds:
+            try:
+                response = requests.get(
+                    feed_url,
+                    timeout=20,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+                        ),
+                        "Accept": "application/rss+xml, application/xml, text/xml, */*"
+                    }
+                )
+
+            except requests.exceptions.RequestException as e:
+                print("Feed request failed:", source, feed_url, e)
+                continue
+
+            print(
+                "Feed status:",
+                source,
+                response.status_code,
+                "bytes:",
+                len(response.text)
+            )
+
+            if response.status_code != 200:
+                continue
+
+            feed = feedparser.parse(response.text)
+
+            print("Feed items:", source, len(feed.entries))
+
+            for entry in feed.entries:
+                title = entry.get("title", "")
+                summary = entry.get("summary", "")
+                url = entry.get("link", "")
+                combined = (title + " " + summary).strip()
+
+                if not combined:
+                    continue
+
+                if should_skip_url(url):
+                    continue
+
+                candidate_score = score_candidate(
+                    title,
+                    summary,
+                    event_query
+                )
+
+                keyword_hits = keyword_support_score(
+                    combined,
+                    event_query
+                )
+
+                if not candidate_passes_initial_filter(
+                    candidate_score,
+                    keyword_hits
+                ):
+                    continue
+
+                print(
+                    "Candidate:",
+                    source,
+                    "|",
+                    title,
+                    "| score:",
+                    round(candidate_score, 3),
+                    "| keyword hits:",
+                    keyword_hits
+                )
+
+                candidates.append(
+                    {
+                        "source": source,
+                        "title": title,
+                        "summary": summary,
+                        "url": url,
+                        "published": entry.get("published", ""),
+                        "candidate_score": candidate_score,
+                        "keyword_hits": keyword_hits
+                    }
+                )
+
+        print("Candidate count:", len(candidates))
+
+        if len(candidates) == 0:
+            rows.append(
+                {
+                    "source": source,
+                    "title": "",
+                    "url": "",
+                    "published": "",
+                    "text_path": "",
+                    "status": "no_relevant_article_found"
+                }
+            )
+            continue
+
+        candidates.sort(
+            key=lambda x: (
+                x["candidate_score"],
+                x["keyword_hits"],
+                x["published"]
+            ),
+            reverse=True
+        )
+
+        saved = False
+
+        for article in candidates:
+            articles_to_try = [article]
+
+            if (
+                article["source"] == "Democracy_Now"
+                and article["title"].lower().startswith("headlines")
+            ):
+                articles_to_try = []
+
+                for x in get_democracy_now_deeper_links(article["url"]):
+                    if should_skip_url(x["url"]):
+                        continue
+
+                    articles_to_try.append(
+                        {
+                            "source": article["source"],
+                            "title": x["title"],
+                            "summary": "",
+                            "url": x["url"],
+                            "published": article["published"],
+                            "candidate_score": article["candidate_score"],
+                            "keyword_hits": article["keyword_hits"]
+                        }
+                    )
+
+            for candidate in articles_to_try:
+                if candidate["url"] in visited_urls:
+                    continue
+
+                if should_skip_url(candidate["url"]):
+                    continue
+
+                visited_urls.add(candidate["url"])
+
+                print("Trying:", candidate["source"], "|", candidate["title"])
+                print(candidate["url"])
+
+                try:
+                    text = extract_text(candidate["url"])
+
+                    if text is None:
+                        print("Trafilatura/BeautifulSoup returned None")
+                        continue
+
+                    print("Extracted words:", len(text.split()))
+
+                    if not is_valid_article_text(text):
+                        print("Rejected by is_valid_article_text")
+                        continue
+
+                    if not is_valid_for_event(text, event_query):
+                        print("Rejected by is_valid_for_event")
+                        continue
+
+                    filename = (
+                        clean_filename(
+                            candidate["source"] + "_" + candidate["title"]
+                        )
+                        + ".txt"
+                    )
+
+                    text_path = text_dir / filename
+                    text_path.write_text(text, encoding="utf-8")
+
+                    rows.append(
+                        {
+                            "source": candidate["source"],
+                            "title": candidate["title"],
+                            "published": candidate["published"],
+                            "url": candidate["url"],
+                            "text_path": str(text_path),
+                            "status": "saved",
+                            "collection_mode": COLLECTION_MODE,
+                            "candidate_score": candidate["candidate_score"],
+                            "keyword_hits": candidate["keyword_hits"]
+                        }
+                    )
+
+                    saved = True
+                    break
+
+                except Exception as e:
+                    print("Extraction error:", e)
+
+            if saved:
+                break
+
+            time.sleep(2)
+
+    metadata_df = pd.DataFrame(rows)
+    metadata_df.to_csv(output_dir / "metadata.csv", index=False)
+
+    frozen_df = metadata_df[
+        metadata_df["status"] == "saved"
+    ].copy()
+
+    frozen_df.to_csv(output_dir / "frozen_metadata.csv", index=False)
+
+    return frozen_df
+
+
+def load_corpus(output_dir):
+    metadata_file = output_dir / "frozen_metadata.csv"
+
+    if not metadata_file.exists():
+        return pd.DataFrame()
+
+    metadata = pd.read_csv(metadata_file)
+
+    rows = []
+
+    for _, row in metadata.iterrows():
+        try:
+            text = Path(row["text_path"]).read_text(encoding="utf-8")
+
+            rows.append(
+                {
+                    "source": row["source"],
+                    "title": row["title"],
+                    "url": row["url"],
+                    "text_path": row["text_path"],
+                    "text": text
+                }
+            )
+
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+def compute_features(
+        df,
+        event_query,
+        event_output_dir,
+        vad_lexicon,
+        emotion_lexicon
+):
+    if df.empty or len(df) < 2:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = df.copy()
+
+    if "source" not in df.columns and "outlet" in df.columns:
+        df["source"] = df["outlet"]
+
+    df["num_words"] = df["text"].apply(word_count)
+    df["num_sentences"] = df["text"].apply(sentence_count)
+
+    df = add_emotional_amplification(
+        df,
+        vad_lexicon,
+        emotion_lexicon
+    )
+
+    df = add_stance_misalignment(
+        df,
+        event_query
+    )
+
+    df = add_causal_coherence(df)
+
+    df = add_hedging(df)
+
+    df = add_tfidf_discourse_emphasis(df)
+
+    df = add_omission_scores(df)
+
+    df = add_semantic_content_deviation(df)
+
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    for column in PROPOSAL_FEATURE_COLUMNS:
+        if column not in df.columns:
+            df[column] = 0.0
+
+    df[PROPOSAL_FEATURE_COLUMNS] = (
+        df[PROPOSAL_FEATURE_COLUMNS]
+        .fillna(0.0)
+    )
+
+    df["framing_index_consensus_adjusted"] = (
+        df[PROPOSAL_FEATURE_COLUMNS]
+        .mean(axis=1)
+    )
+
+    labeled_feature_df = df[
+        ["source", "title", "url"]
+        + PROPOSAL_FEATURE_COLUMNS
+    ].copy()
+
+    labeled_feature_df = labeled_feature_df.rename(
+        columns=FEATURE_LABELS
+    )
+
+    rankings_df = (
+        df
+        .sort_values(
+            by="framing_index_consensus_adjusted",
+            ascending=False
+        )
+        .reset_index(drop=True)
+    )
+
+    rankings_df.insert(
+        0,
+        "rank",
+        range(1, len(rankings_df) + 1)
+    )
+
+    rankings_df.to_csv(
+        event_output_dir / "framing_rankings.csv",
+        index=False
+    )
+
+    return df, labeled_feature_df
+
+
+def run_event(event):
+    event_query = event["query"]
+
+    output_dir = PROJECT_DIR / event["folder"]
+    output_dir.mkdir(exist_ok=True)
+
+    print("=" * 60)
+    print("EVENT:", event_query)
+    print("OUTPUT:", output_dir)
+    print("=" * 60)
+
+    collect_event(
+        event_query,
+        output_dir
+    )
+
+    corpus_df = load_corpus(output_dir)
+
+    print("Corpus size:", len(corpus_df))
+
+    if len(corpus_df) < 2:
+        print("Skipping event: too few valid articles.")
+        return False
+
+    feature_df, labeled_feature_df = compute_features(
+        corpus_df,
+        event_query,
+        output_dir,
+        vad_lexicon,
+        emotion_lexicon
+    )
+
+    if feature_df.empty:
+        print("Skipping event: no features generated.")
+        return False
+
+    feature_df.to_csv(
+        output_dir / "framing_dataset.csv",
+        index=False
+    )
+
+    labeled_feature_df.to_csv(
+        output_dir / "proposal_labeled_features.csv",
+        index=False
+    )
+
+    print("Saved:")
+    print(output_dir / "framing_dataset.csv")
+    print(output_dir / "proposal_labeled_features.csv")
+    print(output_dir / "framing_rankings.csv")
+
+    return True
+
+def run_fixed_events(vad_lexicon, emotion_lexicon):
+    successful = 0
+
+    for event in EVENTS:
+        if run_event(event):
+            successful += 1
+
+    print(
+        "Successful fixed events:",
+        successful,
+        "/",
+        len(EVENTS)
+    )
+
+DISCOVERED_EVENTS_DIR = PROJECT_DIR / "discovered_events"
+DISCOVERED_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+DISCOVERY_MIN_ARTICLES = 4
+DISCOVERY_MIN_SOURCES = 3
+DISCOVERY_MIN_AVG_PAIRWISE_SIM = 0.42
+DISCOVERY_CLUSTER_DISTANCE_THRESHOLD = 0.55
+
+
+def collect_broad_rss_articles():
+    rows = []
+    seen_urls = set()
+
+    for source, feeds in RSS_FEEDS.items():
+        print("Broad scan:", source)
+
+        for feed_url in feeds:
+            items = get_feed_items(feed_url)
+
+            for item in items:
+                url = item.get("link", "")
+
+                if not url or url in seen_urls:
+                    continue
+
+                seen_urls.add(url)
+
+                rows.append(
+                    {
+                        "source": source,
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", ""),
+                        "url": url,
+                        "published": item.get("published", "")
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
+def extract_broad_articles(article_df):
+    rows = []
+
+    for _, row in article_df.iterrows():
+        text = extract_text(row["url"])
+
+        if text is None:
+            continue
+
+        rows.append(
+            {
+                "source": row["source"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "url": row["url"],
+                "published": row["published"],
+                "text": text
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def add_article_embeddings(df):
+    df = df.copy()
+
+    texts = (
+        df["title"].astype(str)
+        + " "
+        + df["summary"].astype(str)
+        + " "
+        + df["text"].astype(str).str[:1500]
+    ).tolist()
+
+    embeddings = EMBEDDING_MODEL.encode(
+        texts,
+        normalize_embeddings=True
+    )
+
+    df["embedding"] = list(embeddings)
+
+    return df
+
+
+def cluster_articles(df):
+    df = df.copy()
+
+    if len(df) < DISCOVERY_MIN_ARTICLES:
+        df["cluster_id"] = -1
+        return df
+
+    embeddings = np.vstack(df["embedding"].values)
+
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        metric="cosine",
+        linkage="average",
+        distance_threshold=DISCOVERY_CLUSTER_DISTANCE_THRESHOLD
+    )
+
+    df["cluster_id"] = clustering.fit_predict(embeddings)
+
+    return df
+
+
+def compute_cluster_quality(cluster_df):
+    embeddings = np.vstack(cluster_df["embedding"].values)
+
+    similarity_matrix = cosine_similarity(embeddings)
+
+    pairwise_values = similarity_matrix[
+        np.triu_indices_from(
+            similarity_matrix,
+            k=1
+        )
+    ]
+
+    avg_pairwise_similarity = (
+        float(np.mean(pairwise_values))
+        if len(pairwise_values) > 0
+        else 0.0
+    )
+
+    return {
+        "article_count": len(cluster_df),
+        "source_count": cluster_df["source"].nunique(),
+        "avg_pairwise_similarity": avg_pairwise_similarity
+    }
+
+
+def validate_cluster(cluster_df):
+    quality = compute_cluster_quality(cluster_df)
+
+    if quality["article_count"] < DISCOVERY_MIN_ARTICLES:
+        return False, "too_few_articles", quality
+
+    if quality["source_count"] < DISCOVERY_MIN_SOURCES:
+        return False, "too_few_sources", quality
+
+    if quality["avg_pairwise_similarity"] < DISCOVERY_MIN_AVG_PAIRWISE_SIM:
+        return False, "low_similarity", quality
+
+    return True, "accepted", quality
+
+
+def make_cluster_label(cluster_df):
+    terms = get_common_tfidf_terms(
+        cluster_df,
+        top_n=5
+    )
+
+    if not terms:
+        return "unlabeled_event"
+
+    label = "_".join(terms)
+
+    label = re.sub(
+        r"[^a-zA-Z0-9]+",
+        "_",
+        label
+    )
+
+    return label.strip("_")[:80]
+
+
+def save_discovered_event(
+        cluster_df,
+        cluster_id,
+        quality,
+        vad_lexicon,
+        emotion_lexicon
+):
+    label = make_cluster_label(cluster_df)
+
+    event_folder = (
+        DISCOVERED_EVENTS_DIR
+        /
+        f"cluster_{cluster_id}_{label}"
+    )
+
+    event_folder.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    cluster_df.to_csv(
+        event_folder / "articles.csv",
+        index=False
+    )
+
+    feature_df, labeled_feature_df = compute_features(
+        cluster_df,
+        label,
+        event_folder,
+        vad_lexicon,
+        emotion_lexicon
+    )
+
+    feature_df.to_csv(
+        event_folder / "framing_dataset.csv",
+        index=False
+    )
+
+    labeled_feature_df.to_csv(
+        event_folder / "proposal_labeled_features.csv",
+        index=False
+    )
+
+    return event_folder
+
+
+def run_discovered_events(vad_lexicon, emotion_lexicon):
+    print("=" * 60)
+    print("DISCOVERED EVENTS MODE")
+    print("=" * 60)
+
+    raw_df = collect_broad_rss_articles()
+
+    raw_df.to_csv(
+        DISCOVERED_EVENTS_DIR / "raw_rss_candidates.csv",
+        index=False
+    )
+
+    extracted_df = extract_broad_articles(raw_df)
+
+    extracted_df.to_csv(
+        DISCOVERED_EVENTS_DIR / "extracted_articles.csv",
+        index=False
+    )
+
+    if len(extracted_df) < DISCOVERY_MIN_ARTICLES:
+        print("Too few articles for discovery.")
+        return
+
+    embedded_df = add_article_embeddings(extracted_df)
+
+    clustered_df = cluster_articles(embedded_df)
+
+    quality_rows = []
+
+    accepted_count = 0
+
+    for cluster_id, cluster_df in clustered_df.groupby("cluster_id"):
+        if cluster_id == -1:
+            continue
+
+        accepted, reason, quality = validate_cluster(cluster_df)
+
+        quality_rows.append(
+            {
+                "cluster_id": cluster_id,
+                "accepted": accepted,
+                "rejection_reason": reason,
+                "article_count": quality["article_count"],
+                "source_count": quality["source_count"],
+                "avg_pairwise_similarity": quality["avg_pairwise_similarity"]
+            }
+        )
+
+        if not accepted:
+            continue
+
+        event_folder = save_discovered_event(
+            cluster_df,
+            cluster_id,
+            quality,
+            vad_lexicon,
+            emotion_lexicon
+        )
+
+        print("Saved discovered event:", event_folder)
+
+        accepted_count += 1
+
+    quality_df = pd.DataFrame(quality_rows)
+
+    quality_df.to_csv(
+        DISCOVERED_EVENTS_DIR / "quality_report.csv",
+        index=False
+    )
+
+    print("Accepted discovered events:", accepted_count)
+
+
+COLLECTION_STRATEGY = "fixed_events"
+# COLLECTION_STRATEGY = "discovered_events"
+# COLLECTION_STRATEGY = "both"
+
+
+if __name__ == "__main__":
+    vad_lexicon = load_vad_lexicon(VAD_LEXICON_FILE)
+    emotion_lexicon = load_emotion_lexicon(EMOTION_LEXICON_FILE)
+
+    if COLLECTION_STRATEGY in ["fixed_events", "both"]:
+        run_fixed_events(
+            vad_lexicon,
+            emotion_lexicon
+        )
+
+    if COLLECTION_STRATEGY in ["discovered_events", "both"]:
+        run_discovered_events(
+            vad_lexicon,
+            emotion_lexicon
+        )

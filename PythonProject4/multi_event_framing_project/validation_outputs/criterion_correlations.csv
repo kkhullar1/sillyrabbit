@@ -1,0 +1,2 @@
+comparison,n,pearson_corr,pearson_p,spearman_corr,spearman_p,note
+synthetic_human_vs_current_index,80,0.14439447275535486,0.20128969091068988,0.31582278481012666,0.004320314165565545,Synthetic target only

@@ -1,0 +1,8 @@
+feature,coefficient,abs_coefficient
+content_deviation_deviation,0.5552497434057122,0.5552497434057122
+stance_misalignment_deviation,0.3871942504055233,0.3871942504055233
+omission_score,0.3251484153710645,0.3251484153710645
+emotional_amplification_deviation,0.3132818148193101,0.3132818148193101
+tfidf_discourse_emphasis_deviation,0.18607727474245667,0.18607727474245667
+causal_coherence_deviation,0.16545887154323613,0.16545887154323613
+hedge_rate_deviation,0.0,0.0

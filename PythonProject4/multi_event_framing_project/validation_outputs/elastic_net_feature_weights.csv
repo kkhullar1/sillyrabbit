@@ -1,0 +1,12 @@
+feature,coefficient,abs_coefficient
+omission_score,1.4984639490455272,1.4984639490455272
+conflict_language_rate_deviation,0.26985775283074176,0.26985775283074176
+defense_language_rate_deviation,0.2550485033749156,0.2550485033749156
+ukraine_agency_rate_deviation,0.1571128549245088,0.1571128549245088
+russia_agency_rate_deviation,-0.09648454453224553,0.09648454453224553
+diplomacy_aid_rate_deviation,0.019650416003713343,0.019650416003713343
+emotion_deviation,0.0,0.0
+content_deviation_from_average,0.0,0.0
+semantic_deviation_from_average,0.0,0.0
+agency_balance_deviation,0.0,0.0
+conflict_vs_diplomacy_balance_deviation,0.0,0.0

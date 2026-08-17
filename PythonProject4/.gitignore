@@ -1,0 +1,22 @@
+# macOS system files
+.DS_Store
+
+# IDE / Code Editor configuration files
+.idea/
+.vscode/
+
+# Python caching and build files
+__pycache__/
+*.pyc
+
+# Compressed file archives
+*.zip
+*.tar.gz
+
+# Ignore all event data folders
+event_*/
+
+# Ignore machine learning models and heavy training checkouts
+discourse/
+*.pt
+*.bin

@@ -1,0 +1,2 @@
+comparison,n,pearson_corr,pearson_p,spearman_corr,spearman_p,note
+synthetic_human_vs_current_index,0,,,,,Need at least 10 rows
