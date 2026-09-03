@@ -32,3 +32,7 @@ discourse/deberta_pdtb_english_style/
 *.pt
 *.bin
 DP/
+
+# Backup files
+*.bak
+*~
