@@ -41,3 +41,5 @@ DP/
 multi_event_framing_project/validation_outputs/*
 !multi_event_framing_project/validation_outputs/article_relevance_audit.csv
 !multi_event_framing_project/validation_outputs/article_relevance_audit_1.csv
+
+*.bak_*
