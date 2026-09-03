@@ -4,8 +4,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = (
-    Path("/Users/keshkhullar/PycharmProjects/PythonProject4")
+    PROJECT_DIR
     / "multi_event_framing_project"
     / "validation_outputs"
 )
