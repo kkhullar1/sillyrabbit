@@ -31,3 +31,4 @@ discourse/deberta_pdtb_english_style/
 # Ignore model weight files globally
 *.pt
 *.bin
+DP/
