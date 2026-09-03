@@ -17,6 +17,17 @@ __pycache__/
 event_*/
 
 # Ignore machine learning models and heavy training checkouts
-discourse/
+# Ignore everything in discourse by default
+discourse/*
+
+# Keep lightweight inference code in Git
+!discourse/__init__.py
+!discourse/infer_deberta_pdtb.py
+
+# Keep large model/checkpoint directories out of Git
+discourse/models/
+discourse/deberta_pdtb_english_style/
+
+# Ignore model weight files globally
 *.pt
 *.bin
