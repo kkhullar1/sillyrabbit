@@ -12,3 +12,6 @@ sentence-transformers==5.6.0
 torch==2.12.1
 trafilatura==2.1.0
 transformers==5.12.1
+
+protobuf==7.36.1
+sentencepiece==0.2.2
