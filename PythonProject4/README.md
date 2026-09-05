@@ -1,53 +1,54 @@
 # Framing Index
 
-A research pipeline for collecting comparable news coverage of the same events, measuring differences in how those events are framed, and evaluating a multi-feature Framing Index across news sources.
+A research pipeline for collecting news coverage of the same events, measuring differences in how the events are framed using a myriad of features and evaluating a resulting Framing Index incorporating a multitude of news sources. This is WIP.
 
-The project combines article collection, natural language processing, discourse-relation modeling, semantic comparison, and statistical validation. It is designed to compare articles covering the same event rather than treating framing as a property of an article in isolation.
+The project encompasses information retrieval, NLP, discourse-relation modeling, lexicon and semantic comparison, and feature validation methods.
 
 ## Overview
 
-The pipeline has three main stages:
+The pipeline is constituted of three stages:
 
-1. **Article collection and feature extraction** — `collect.py`
-2. **Framing Index validation** — `validate.py`
-3. **Results visualization** — `make_results_figures.py`
+1. **Information retrieval/Article collection and feature extraction** — `collect.py`
+2. **Feature and Index validation** — `validate.py`
+3. **Results** — `make_results_figures.py`
 
-A separate setup script, `setup_models.py`, downloads the model checkpoint required for PDTB-style discourse-relation inference.
+To complement these files, a setup script file, `setup_models.py`, is provided with the downloadable model checkpoint required for the PDTB-style discourse-relation feature ('Causal Coherence' feature).
 
-## Framing Features
+## Features
 
-The current Framing Index uses seven features:
+The current iteration of the Framing Index uses seven features:
 
-- **Hedging** — measures differences in hedging language relative to other coverage of the event.
-- **Emotional Amplification** — measures differences in emotional intensity and emotion distributions.
-- **Discourse Emphasis** — measures differences in the prominence of terms and topics across coverage.
-- **Omission / Informational Omission** — measures potentially missing salient information relative to the shared event-level information.
-- **Semantic / Content Deviation** — measures how far an article's semantic content deviates from the event-level consensus.
-- **Stance Misalignment** — measures differences in stance relative to the event and other coverage.
+- **Hedging** — measures differences in hedging language in an article relative to overall coverage of the event.
+- **Emotional Amplification** — measures differences in an article's emotional intensity relative to the emotion distribution from the overall coverage.
+- **Discourse Emphasis** — measures differences in the prominence of terms across coverage relative to the average of the event's corpora.
+- **Omission** — measures potentially missing salient information in an article relative to event-level corpora.
+- **Semantic / Content Deviation** — measures how far an article's semantic content deviates from the event-level consensus.[Can I put this under Omission?]
+- **Stance Misalignment** — measures difference in stance of an article relative to average event-level coverage.
+- **Causal Coherence** — measures differences in discourse-relation patterns using PDTB-style relation probabilities.
 - **Causal Coherence** — measures differences in discourse-relation patterns using PDTB-style relation probabilities.
 
-The current implementation combines the feature-level deviation scores into a consensus-adjusted Framing Index.
+This implementation combines the feature-level deviation scores into a Framing Index score.
 
-## Collection Modes
+## Collection
 
-`collect.py` supports two approaches to constructing comparable event corpora.
+`collect.py` supports two WIP approaches to constructing comparable event corpora - Fixed events and Discovered Events.
 
 ### Fixed Events
 
-In `fixed_events` mode, predefined event queries are used to identify relevant articles across configured news sources.
+The `fixed_events` approach requires predefined events. Queries are then used to identify relevant articles across a given set of news sources.
 
-For each event, the pipeline:
+Given any event, the pipeline is as shown:
 
-1. searches configured RSS feeds,
+1. searches RSS feeds,
 2. scores candidate articles for event relevance,
 3. extracts article text,
 4. saves collection metadata,
-5. computes the framing features, and
+5. computes the framing features,
 6. produces event-level framing datasets and rankings.
 
 ### Discovered Events
 
-In `discovered_events` mode, the pipeline collects a broader pool of recent articles and discovers candidate events automatically.
+The `discovered_events` approach identifies candidate events automatically by analyzing and sorting through a large pool of articles.
 
 Articles are:
 
@@ -58,7 +59,7 @@ Articles are:
 5. evaluated using cluster-quality criteria, and
 6. processed through the framing-feature pipeline when a cluster is accepted.
 
-The collection strategy is selected in `collect.py`:
+The current default is 'Fixed Events' as this is a WIP.
 
 ```python
 COLLECTION_STRATEGY = "fixed_events"
@@ -68,13 +69,11 @@ COLLECTION_STRATEGY = "fixed_events"
 
 ## News Sources
 
-The collection pipeline uses configured RSS feeds from multiple news organizations.
-
-The current source configuration is defined directly in `collect.py`. Sources may be added, removed, or modified there as the corpus design develops.
+The collection pipeline uses RSS feeds from multiple news organizations. Sources may be added, removed, or modified in 'collect.py' as the corpus progresses.
 
 ## Project Structure
 
-The main project files are:
+The project files are as shown:
 
 ```text
 PythonProject4/
@@ -93,15 +92,13 @@ PythonProject4/
     └── event data and outputs
 ```
 
-Large model checkpoints are intentionally excluded from Git and are installed separately.
-
-The local `DP/` directory is a separate external repository and is not part of the main Framing Index codebase.
+Large model checkpoints have been intentionally excluded from git. The local `DP/` directory is a separate external repository and is not part of the main Framing Index codebase.
 
 ## Installation
 
 The current development environment uses Python 3.14.
 
-Create and activate a virtual environment, then install the project's Python dependencies:
+Instruction: (1) Create a virtual environment then (2) Install Python dependencies.
 
 ```bash
 python -m venv .venv
@@ -109,43 +106,43 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Dependencies are pinned in `requirements.txt` to reproduce the development environment.
+Dependencies are pinned in `requirements.txt`. Using this, one can reproduce the required development environment.
 
 ## Required Lexicons
 
-The feature-extraction pipeline expects the following resources:
+The feature-extraction pipeline expects the following '.txt' files:
 
 ```text
 multi_event_framing_project/lexicons/NRC-VAD-Lexicon.txt
 multi_event_framing_project/lexicons/NRC-Emotion-Lexicon.txt
 ```
 
-These resources must be present before running `collect.py`.
+These files must be present and available before running `collect.py`.
 
 ## PDTB / DeBERTa Model Setup
 
 Causal-coherence analysis uses a fine-tuned DeBERTa sequence-classification model for PDTB-style discourse relations.
 
-The inference code is included in:
+The code is found in:
 
 ```text
 discourse/infer_deberta_pdtb.py
 ```
 
-The large model checkpoint is not stored in Git. Install it with:
+The large model checkpoint (1590) is not stored in git. Instead, Install it with,
 
 ```bash
 python setup_models.py
 ```
 
-The script downloads:
+Running the file downloads:
 
 ```text
 config.json
 pytorch_model.bin
 ```
 
-and places them in:
+and puts them in,
 
 ```text
 discourse/models/original_deberta_pdtb/checkpoint-1590/
@@ -158,13 +155,13 @@ The model predicts four high-level discourse-relation classes:
 - Expansion
 - Temporal
 
-The tokenizer is loaded from `microsoft/deberta-v3-large`.
+The tokenizer loads from `microsoft/deberta-v3-large`.
 
-The model repository is currently hosted separately on Hugging Face. If that repository is private, authentication and permission to access it are required before running `setup_models.py`.
+The model repository is hosted separately on Hugging Face. Given the repository may be private, authentication and permission may be required to access it before the running of `setup_models.py`.
 
 ## Running the Pipeline
 
-### 1. Collect Articles and Compute Framing Features
+### 1. Collecting Articles and Computing Features
 
 Run:
 
@@ -172,9 +169,9 @@ Run:
 python collect.py
 ```
 
-The desired collection strategy should first be selected using `COLLECTION_STRATEGY` in `collect.py`.
+First, the collection strategy is chosen under `collect.py`.
 
-For successfully processed events, outputs include:
+Following a successful processing of events, outputs are produced:
 
 ```text
 metadata.csv
@@ -184,19 +181,19 @@ proposal_labeled_features.csv
 framing_rankings.csv
 ```
 
-Extracted article text is also stored with the corresponding event data.
+Extracted article text is stored with and connected to its related event data.
 
-Discovered-event mode additionally produces discovery and cluster-quality outputs.
+Discovered-event mode, in addition, carries out event-discovery and provides cluster-related outputs.
 
-### 2. Validate the Framing Index
+### 2. Framing Index Validation
 
-After event-level `framing_dataset.csv` files have been generated, run:
+After `framing_dataset.csv` files have been created, run:
 
 ```bash
 python validate.py
 ```
 
-The validation pipeline combines available event datasets and performs statistical evaluation of the Framing Index and its component features.
+This validation pipeline performs statistical analyses on the features of the Framing Index.
 
 The current validation procedure includes:
 
@@ -207,17 +204,17 @@ The current validation procedure includes:
 - feature-correlation analysis,
 - source-level summaries,
 - Elastic Net regression,
-- cross-validated predictions,
+- cross-validated performance measures,
 - MAE, RMSE, and R² evaluation, and
 - bootstrap coefficient stability analysis.
 
-Validation outputs are stored under:
+Validation outputs are stored in:
 
 ```text
 multi_event_framing_project/validation_outputs/
 ```
 
-Important outputs include:
+The resulting outputs are:
 
 ```text
 criterion_correlations.csv
@@ -228,29 +225,29 @@ elastic_net_coefficients.csv
 bootstrap_coefficients.csv
 ```
 
-## Article Relevance Audit
+## Article Audit
 
-Validation includes an article-level relevance audit:
+The validation pipeline includes an article-level relevance and, by extension, data quality, check:
 
 ```text
 multi_event_framing_project/validation_outputs/article_relevance_audit_1.csv
 ```
 
-This file is designed to preserve manual relevance judgments.
+This file preserves human-coded relevance judgments.
 
-If manual `relevance_label` values are present, the validation pipeline can restrict analysis to articles labeled as relevant. If no manual labels have yet been entered, validation continues with the available unfiltered dataset.
+If human-coded `relevance_label` values are available, the validation pipeline is able to restrict analysis to only those articles labeled as relevant. If there are no human-coded labels, validation is unfiltered.
 
-Because this file contains human annotations, it should be preserved rather than treated as an automatically regenerable output.
+Given this file contains human annotation, it should be stored for potential future use rather than be treated as an easily reproducible output.
 
-## Generate Validation Figures
+## Validation Output
 
-After running `validate.py`, generate the main results figures with:
+After running `validate.py`, generate index visualizations using:
 
 ```bash
 python make_results_figures.py
 ```
 
-The script reads the validation outputs and produces:
+The output includes:
 
 ```text
 figure_1_framing_index_vs_synthetic_score.png
@@ -260,15 +257,15 @@ figure_4_source_median_index.png
 figure_5_feature_correlation_matrix.png
 ```
 
-These figures are written to:
+The output is stored in:
 
 ```text
 multi_event_framing_project/validation_outputs/
 ```
 
-## Complete Run Order
+## Run Order
 
-For a new environment, the intended sequence is:
+To run these files in a new environment, the sequence is:
 
 ```bash
 python -m venv .venv
@@ -281,26 +278,24 @@ python validate.py
 python make_results_figures.py
 ```
 
-After the initial environment and model setup, subsequent analyses normally begin with `collect.py`.
+After setting up the new environment, analysis begins with `collect.py`.
 
-## Main Outputs
+## Outputs
 
-At the event level, the project produces article metadata, extracted article text, feature-level framing measurements, overall Framing Index values, and article rankings.
+At the event level, the project produces article text, feature scores, Framing Index values, and articles ranked by index values.
 
-At the validation level, it produces correlation analyses, model coefficients, cross-validated predictions, bootstrap estimates, source summaries, and publication-ready diagnostic figures.
+Towards validation, it produces correlation analyses, model coefficients, cross-validated performance measures, bootstrap estimates, Framing Index scores by source, and diagnostic values.
 
 ## Reproducibility
 
-The repository is structured so that machine-specific paths are not required for the main analysis workflow.
+The repository is structured such that a user's computer-specific paths are not required for reproducing operations.
 
-Python package versions are recorded in `requirements.txt`, and the large PDTB/DeBERTa checkpoint is downloaded separately using `setup_models.py`.
+`requirements.txt` tracks python package versions, and `setup_models.py` downloads the PDTB/DeBERTa checkpoint.
 
-Large model weights, virtual environments, caches, and regenerable local artifacts should not be committed to Git.
-
-Human-generated annotations, particularly the article relevance audit, should be retained.
+Any human-generated annotations should be stored for future use.
 
 ## Research Status
 
-This repository contains an actively developed research implementation. Feature definitions, validation procedures, event-selection methods, and corpus composition may continue to evolve as the methodology is evaluated.
+This repository is an implementation of a Framing Index being actively developed. This will evolve as the methodology changes.
 
-Results should therefore be interpreted in the context of the specific code version, event corpus, feature definitions, and validation data used for a given analysis.
+Results should be interpreted in the context of event corpora, features included, and validation approaches used in the analyses.
